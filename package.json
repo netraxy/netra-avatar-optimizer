@@ -1,0 +1,16 @@
+{
+  "name": "com.netra.avatar-optimizer",
+  "displayName": "NETRA Avatar Optimizer",
+  "version": "1.0.0",
+  "unity": "2022.3",
+  "description": "Unity Editor tool to optimize VRChat avatars — physics bones, mesh, textures, blendshapes, materials.",
+  "author": {
+    "name": "NETRA",
+    "url": "https://github.com/YOUR_GITHUB_USERNAME"
+  },
+  "vpmDependencies": {
+    "com.vrchat.avatars": ">=3.5.0"
+  },
+  "url": "https://github.com/YOUR_GITHUB_USERNAME/netra-avatar-optimizer/releases/download/1.0.0/com.netra.avatar-optimizer-1.0.0.zip",
+  "changelogUrl": "https://github.com/YOUR_GITHUB_USERNAME/netra-avatar-optimizer/blob/main/CHANGELOG.md"
+}
