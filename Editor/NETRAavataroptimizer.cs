@@ -454,6 +454,10 @@ public class VRChatAvatarOptimizer : EditorWindow
     // ═════════════════════════════════════════════════════════════
     //  MESH + UV PAINTER
     // ═════════════════════════════════════════════════════════════
+    private class FbxEntry { public string assetPath; public string displayName; public bool selected = true; }
+    private List<FbxEntry> _comprFbxList  = new List<FbxEntry>();
+    private Vector2         _comprFbxScroll;
+
     private int  _meshQuality    = 75, _maxTrisQuest = 32000, _maxTrisPC = 70000, _blendMode = 2;
     private int  _compressionLvl = 1; // 0=Off 1=Low 2=Medium 3=High
     private static readonly string[] _compressionLvlLabels = { "Off", "Low", "Medium", "High" };
@@ -493,7 +497,7 @@ public class VRChatAvatarOptimizer : EditorWindow
     private static readonly int[]    _maxSizeVals   = { 32,64,128,256,512,1024,2048,4096,8192 };
     private static readonly string[] _maxSizeLabels = { "32","64","128","256","512","1024","2048","4096","8192" };
     private int _texMaxSizeIdx = 5, _texResizeAlgo = 0, _texFormatIdx = 0, _texCompIdx = 3;
-    private bool _texUseCrunch; private int _texCrunchQuality = 50;
+    private bool _texUseCrunch = true; private int _texCrunchQuality = 50;
     private int  _texPlatform = 0; private bool _texGenMipmaps = true, _texSRGB = true;
 
     private class TexEntry { public Texture texture; public string path; public int curSize; public int targetSize; public bool overridden; public int overrideSize; public bool overrideCompression; public int overrideCompIdx; public bool keep = true; }
@@ -562,6 +566,7 @@ public class VRChatAvatarOptimizer : EditorWindow
     private string  _matListSearch    = "";
     private bool    _matListExpanded  = true;
     private bool _matTexApply = true;
+    private bool _matBakeTextures = true;
     private int  _matTexMaxSizeIdx = 5; // 1024
     private int  _matTexCompIdx    = 2; // Normal Quality
     private int  _matTexPlatform   = 0; // Quest
@@ -765,9 +770,6 @@ public class VRChatAvatarOptimizer : EditorWindow
 
         bool compact = position.width < 460;
 
-        EditorGUI.DrawRect(new Rect(10,8,28,28), COL_BG2);
-        EditorGUI.DrawRect(new Rect(12,10,24,24), COL_BG3);
-
         // Undo button (right)
         float undoW  = compact ? 28 : 114;
         float undoX  = position.width - undoW - 8;
@@ -802,7 +804,7 @@ public class VRChatAvatarOptimizer : EditorWindow
         }
 
         // Title (left)
-        float titleX = 46;
+        float titleX = 10;
         float titleW = showDD ? ddX - titleX - 4 : undoX - titleX - 4;
         string titleTxt = compact ? T("app.title.short") : T("app.title");
         GUI.Label(new Rect(titleX, 8, Mathf.Max(titleW, 60), 28),
@@ -1755,12 +1757,27 @@ public class VRChatAvatarOptimizer : EditorWindow
             DestroyImmediate(b.component);
         Log(LogLevel.Success, "Quest physics : " + qSelPhys + " PB, " + Mathf.Min(qCols.Count, qMaxCols) + " Col gardes");
 
-        // ── 6. Dupliquer les FBX + compression mesh Medium ───
+        // ── 6. Dupliquer les FBX ───
         string fbxFolder = outFolder + "/FBX";
         EnsureFolder(fbxFolder);
         var fbxMap = DuplicateFBXFiles(questGO, fbxFolder);
-        if (fbxMap.Count > 0) RemapMeshesToFBX(questGO, fbxMap);
-        ApplyMeshCompressionOnTarget(questGO, ModelImporterMeshCompression.Medium, 2);
+        if (fbxMap.Count > 0)
+        {
+            RemapMeshesToFBX(questGO, fbxMap);
+            // Compression Medium sur les FBX copiés (pas les originaux)
+            AssetDatabase.StartAssetEditing();
+            try
+            {
+                foreach (var destPath in fbxMap.Values)
+                {
+                    var imp = AssetImporter.GetAtPath(destPath) as ModelImporter;
+                    if (imp == null) continue;
+                    imp.meshCompression = ModelImporterMeshCompression.Medium;
+                    imp.SaveAndReimport();
+                }
+            }
+            finally { AssetDatabase.StopAssetEditing(); }
+        }
 
         // ── 7. Dupliquer + optimiser les textures Quest ──────────────
         string texFolder = outFolder + "/Textures";
@@ -2599,9 +2616,61 @@ public class VRChatAvatarOptimizer : EditorWindow
         EditorGUILayout.EndHorizontal();
         EndCard();
 
+        // ── Sélection des FBX ──────────────────────────────────
+        EditorGUILayout.Space(6);
+        EditorGUILayout.BeginHorizontal();
+        SectionLabel("FBX à compresser");
+        GUILayout.FlexibleSpace();
+        if (_comprFbxList.Count > 0)
+        {
+            if (SmallBtn("✅ Tout"))  { _comprFbxList.ForEach(e => e.selected = true);  Repaint(); }
+            if (SmallBtn("❌ Aucun")) { _comprFbxList.ForEach(e => e.selected = false); Repaint(); }
+        }
+        EditorGUILayout.EndHorizontal();
+
+        EditorGUILayout.Space(4);
+        if (AccentBtn(new GUIContent("🔍 Scan", "Liste les FBX présents sur l'avatar sélectionné"), GUILayout.Height(30), GUILayout.ExpandWidth(true)))
+            ScanFbxForCompression();
+        EditorGUILayout.Space(4);
+
+        if (_comprFbxList.Count == 0)
+        {
+            InfoBox("Clique sur 🔍 Scan pour lister les FBX de l'avatar.");
+        }
+        else
+        {
+            BeginCard();
+            _comprFbxScroll = EditorGUILayout.BeginScrollView(_comprFbxScroll,
+                GUILayout.MaxHeight(Mathf.Min(_comprFbxList.Count * 26 + 8, 180)));
+            int rowIdx = 0;
+            foreach (var e in _comprFbxList)
+            {
+                var row = EditorGUILayout.BeginHorizontal(GUILayout.Height(24));
+                EditorGUI.DrawRect(row, rowIdx++ % 2 == 0 ? new Color(0,0,0,0) : new Color(1,1,1,0.04f));
+                bool ns = EditorGUILayout.Toggle(e.selected, GUILayout.Width(18));
+                if (ns != e.selected) { e.selected = ns; Repaint(); }
+                var labelStyle = new GUIStyle(EditorStyles.label)
+                {
+                    normal = { textColor = e.selected ? COL_TEXT : COL_TEXT_DIM },
+                    fontSize = 11
+                };
+                EditorGUILayout.LabelField(new GUIContent(e.displayName, e.assetPath), labelStyle);
+                EditorGUILayout.EndHorizontal();
+                // Ping asset in Project window on click
+                if (Event.current.type == EventType.MouseDown && row.Contains(Event.current.mousePosition))
+                {
+                    var asset = AssetDatabase.LoadMainAssetAtPath(e.assetPath);
+                    if (asset != null) EditorGUIUtility.PingObject(asset);
+                    Event.current.Use();
+                }
+            }
+            EditorGUILayout.EndScrollView();
+            EndCard();
+        }
+
         EditorGUILayout.Space(4);
         EditorGUILayout.BeginHorizontal();
-        if (AccentBtn(new GUIContent(T("mesh.apply.btn"),"Applique la compression aux meshes"), GUILayout.Height(30), GUILayout.ExpandWidth(true))) ApplyMeshCompression();
+        if (AccentBtn(new GUIContent(T("mesh.apply.btn"),"Applique la compression aux meshes sélectionnés"), GUILayout.Height(30), GUILayout.ExpandWidth(true))) ApplyMeshCompression();
         if (UndoBtn(T("btn.undo"), GUILayout.Height(30), GUILayout.Width(90))) Undo.PerformUndo();
         EditorGUILayout.EndHorizontal();
 
@@ -3341,19 +3410,81 @@ public class VRChatAvatarOptimizer : EditorWindow
         EditorUtility.DisplayDialog("Termine", removedCount + " triangle(s) supprimes.\nMesh : " + path, "OK");
     }
 
+    private void ScanFbxForCompression()
+    {
+        if (_avatar == null) return;
+        _comprFbxList.Clear();
+        var seen = new HashSet<string>();
+        foreach (var smr in _avatar.GetComponentsInChildren<SkinnedMeshRenderer>(true))
+        {
+            if (smr?.sharedMesh == null) continue;
+            string p = AssetDatabase.GetAssetPath(smr.sharedMesh);
+            if (string.IsNullOrEmpty(p) || !seen.Add(p)) continue;
+            string ext = Path.GetExtension(p).ToLowerInvariant();
+            if (ext == ".fbx" || ext == ".obj" || ext == ".dae" || ext == ".blend")
+                _comprFbxList.Add(new FbxEntry { assetPath = p, displayName = Path.GetFileName(p), selected = true });
+        }
+        if (_comprFbxList.Count == 0)
+            EditorUtility.DisplayDialog("Aucun FBX", "Aucun fichier FBX/OBJ trouvé dans l'avatar.", "OK");
+        Repaint();
+    }
+
     private void ApplyMeshCompression()
     {
         if (_avatar == null) return;
+
+        List<string> paths;
+        if (_comprFbxList.Count > 0)
+        {
+            paths = _comprFbxList.Where(e => e.selected).Select(e => e.assetPath).ToList();
+        }
+        else
+        {
+            var seen = new HashSet<string>();
+            paths = new List<string>();
+            foreach (var smr in _avatar.GetComponentsInChildren<SkinnedMeshRenderer>(true))
+            {
+                if (smr?.sharedMesh == null) continue;
+                string p = AssetDatabase.GetAssetPath(smr.sharedMesh);
+                if (string.IsNullOrEmpty(p) || !seen.Add(p)) continue;
+                string ext = Path.GetExtension(p).ToLowerInvariant();
+                if (ext == ".fbx" || ext == ".obj" || ext == ".dae" || ext == ".blend")
+                    paths.Add(p);
+            }
+        }
+
+        if (paths.Count == 0)
+        {
+            EditorUtility.DisplayDialog("Aucun FBX sélectionné", "Scanne l'avatar et sélectionne au moins un FBX.", "OK");
+            return;
+        }
+
         var lvl = _compressionLvl == 0 ? ModelImporterMeshCompression.Off
                 : _compressionLvl == 1 ? ModelImporterMeshCompression.Low
                 : _compressionLvl == 2 ? ModelImporterMeshCompression.Medium
                 :                        ModelImporterMeshCompression.High;
 
-        int n = ApplyMeshCompressionOnTarget(_avatar, lvl, _blendMode);
-        EditorUtility.DisplayDialog("Termine",
-            n + " mesh(es) optimises." +
-            "\nBlend shapes : " + _blendModes[_blendMode] +
-            "\nMesh sauvegardes dans Assets/OptimizedMeshes/", "OK");
+        var toReimport = new List<ModelImporter>();
+        foreach (var path in paths)
+        {
+            var imp = AssetImporter.GetAtPath(path) as ModelImporter;
+            if (imp == null) { Log(LogLevel.Warn, "Pas de ModelImporter : " + path); continue; }
+            imp.meshCompression = lvl;
+            EditorUtility.SetDirty(imp);
+            toReimport.Add(imp);
+            Log(LogLevel.Info, "Compression appliquée : " + path);
+        }
+
+        AssetDatabase.StartAssetEditing();
+        try { foreach (var imp in toReimport) imp.SaveAndReimport(); }
+        finally { AssetDatabase.StopAssetEditing(); }
+
+        AssetDatabase.SaveAssets();
+        AssetDatabase.Refresh();
+
+        Log(LogLevel.Success, toReimport.Count + " FBX mis à jour | " + _compressionLvlLabels[_compressionLvl]);
+        EditorUtility.DisplayDialog("Terminé",
+            toReimport.Count + " FBX mis à jour\nCompression : " + _compressionLvlLabels[_compressionLvl], "OK");
     }
 
     private int ApplyMeshCompressionOnTarget(GameObject target, ModelImporterMeshCompression lvl, int blendMode = 2)
@@ -3518,30 +3649,89 @@ public class VRChatAvatarOptimizer : EditorWindow
     {
         if (_avatar == null) { InfoBox(T("msg.no.avatar.top")); return; }
 
+        // ── PARAMÈTRES GLOBAUX ───────────────────────────────────────
         SectionLabel(T("tex.section"));
         BeginCard();
-        _texPlatform = EditorGUILayout.Popup(new GUIContent(T("lbl.platform"), "Android Quest / PC Standalone / Les deux"), _texPlatform, _platformLabels);
-        _texMaxSizeIdx = EditorGUILayout.Popup(new GUIContent("Max Size", "Resolution max des textures"), _texMaxSizeIdx, _maxSizeLabels);
-        _texResizeAlgo = EditorGUILayout.Popup(new GUIContent("Resize Algorithm", "Algorithme de redimensionnement"), _texResizeAlgo, _resizeAlgos);
-        _texFormatIdx = EditorGUILayout.Popup(new GUIContent("Format", "Format de compression (ASTC pour Quest, BC7 pour PC qualite max)"), _texFormatIdx, _fmtLabels);
-        _texCompIdx = EditorGUILayout.Popup(new GUIContent("Compression", "None (qualite max) a High Quality (balance)"), _texCompIdx, _compLabels);
+
+        // Plateforme cible — pleine largeur
+        var platStyle = new GUIStyle(EditorStyles.boldLabel) { normal = { textColor = COL_ACCENT2 }, fontSize = 11 };
+        EditorGUILayout.BeginHorizontal();
+        GUILayout.Label("🎯 Plateforme cible", platStyle, GUILayout.Width(118));
+        _texPlatform = EditorGUILayout.Popup(_texPlatform, _platformLabels);
+        EditorGUILayout.EndHorizontal();
+
+        EditorGUI.DrawRect(GUILayoutUtility.GetRect(0, 1, GUILayout.ExpandWidth(true)), COL_SEP);
         EditorGUILayout.Space(4);
-        _texGenMipmaps = EditorGUILayout.Toggle(new GUIContent("Generate Mip Maps", "Genere les mipmaps (recommande pour perf)"), _texGenMipmaps);
-        _texSRGB = EditorGUILayout.Toggle(new GUIContent("sRGB (Color Texture)", "A cocher pour les textures de couleur, pas les normal maps"), _texSRGB);
-        _texUseCrunch = EditorGUILayout.Toggle(new GUIContent("Use Crunch Compression", "Compression additionnelle pour reduire la taille fichier"), _texUseCrunch);
+
+        // Grille 2 colonnes : taille / format  |  algo / compression
+        float colW = (EditorGUIUtility.currentViewWidth - 32) * 0.5f;
+        var lblStyle = new GUIStyle(EditorStyles.miniLabel) { normal = { textColor = COL_TEXT_DIM }, fontSize = 10 };
+
+        EditorGUILayout.BeginHorizontal();
+
+        // Colonne gauche
+        EditorGUILayout.BeginVertical(GUILayout.Width(colW));
+        GUILayout.Label("Taille max", lblStyle);
+        _texMaxSizeIdx = EditorGUILayout.Popup(_texMaxSizeIdx, _maxSizeLabels, GUILayout.ExpandWidth(true));
+        EditorGUILayout.Space(4);
+        GUILayout.Label("Algo. redim.", lblStyle);
+        _texResizeAlgo = EditorGUILayout.Popup(_texResizeAlgo, _resizeAlgos, GUILayout.ExpandWidth(true));
+        EditorGUILayout.EndVertical();
+
+        GUILayout.Space(8);
+
+        // Colonne droite
+        EditorGUILayout.BeginVertical(GUILayout.Width(colW));
+        GUILayout.Label("Format", lblStyle);
+        _texFormatIdx = EditorGUILayout.Popup(_texFormatIdx, _fmtLabels, GUILayout.ExpandWidth(true));
+        EditorGUILayout.Space(4);
+        GUILayout.Label("Compression", lblStyle);
+        _texCompIdx = EditorGUILayout.Popup(_texCompIdx, _compLabels, GUILayout.ExpandWidth(true));
+        EditorGUILayout.EndVertical();
+
+        EditorGUILayout.EndHorizontal();
+
+        EditorGUILayout.Space(8);
+        EditorGUI.DrawRect(GUILayoutUtility.GetRect(0, 1, GUILayout.ExpandWidth(true)), COL_SEP);
+        EditorGUILayout.Space(4);
+
+        // Options booléennes — ligne horizontale compacte
+        EditorGUILayout.BeginHorizontal();
+        _texGenMipmaps = ToggleChip(_texGenMipmaps, "Mip Maps",  "Améliore le rendu à distance (recommandé)");
+        GUILayout.Space(6);
+        _texSRGB       = ToggleChip(_texSRGB,       "sRGB",      "À activer pour les textures de couleur (pas les normal maps)");
+        GUILayout.Space(6);
+        _texUseCrunch  = ToggleChip(_texUseCrunch,  "Crunch",    "Compression supplémentaire — réduit la taille fichier");
+        GUILayout.FlexibleSpace();
+        EditorGUILayout.EndHorizontal();
+
         if (_texUseCrunch)
         {
-            EditorGUI.indentLevel++;
-            _texCrunchQuality = EditorGUILayout.IntSlider("Compressor Quality", _texCrunchQuality, 0, 100);
-            EditorGUI.indentLevel--;
+            EditorGUILayout.Space(4);
+            EditorGUILayout.BeginHorizontal();
+            GUILayout.Label("Qualité Crunch", lblStyle, GUILayout.Width(90));
+            _texCrunchQuality = EditorGUILayout.IntSlider(_texCrunchQuality, 0, 100);
+            EditorGUILayout.EndHorizontal();
         }
+
         EndCard();
 
-        EditorGUILayout.Space(6);
+        // ── ACTIONS ──────────────────────────────────────────────────
+        EditorGUILayout.Space(8);
+
+        // Ligne 1 : Scan Textures + Scan Inutilisées
         EditorGUILayout.BeginHorizontal();
-        if (AccentBtn(new GUIContent(T("tex.scan.btn"),"Liste toutes les textures avec vignettes"), GUILayout.Height(30))) ScanTextures();
-        if (SuccessBtn(new GUIContent(T("tex.scan.unused.btn"),"Detecte les textures importees mais non referencees"), GUILayout.Height(30))) ScanUnusedTextures();
-        if (AccentBtn(T("tex.apply.all.btn"), GUILayout.Height(30)))
+        if (AccentBtn(new GUIContent("🔍 Scan Textures", "Liste toutes les textures de l'avatar avec vignettes"), GUILayout.Height(32)))
+            ScanTextures();
+        if (SuccessBtn(new GUIContent("🧹 Scan Inutilisées", "Détecte les textures importées mais non référencées dans le projet"), GUILayout.Height(32)))
+            ScanUnusedTextures();
+        EditorGUILayout.EndHorizontal();
+
+        EditorGUILayout.Space(4);
+
+        // Ligne 2 : Apply to All + Undo
+        EditorGUILayout.BeginHorizontal();
+        if (AccentBtn(new GUIContent("✅ Appliquer à tout", "Applique les paramètres globaux à toutes les textures scannées"), GUILayout.Height(30), GUILayout.ExpandWidth(true)))
         {
             if (EditorUtility.DisplayDialog(T("dlg.confirm"), "Modifier toutes les textures ?", T("btn.apply"), T("dlg.cancel")))
                 ApplyTexturesAll();
@@ -3549,10 +3739,30 @@ public class VRChatAvatarOptimizer : EditorWindow
         if (UndoBtn(T("btn.undo"), GUILayout.Height(30), GUILayout.Width(80))) Undo.PerformUndo();
         EditorGUILayout.EndHorizontal();
 
+        // ── LISTE TEXTURES ───────────────────────────────────────────
         if (_texScanned && _texList.Count > 0)
         {
-            EditorGUILayout.Space(6);
-            SectionLabel(T("tex.section") + " (" + _texList.Count + ")");
+            EditorGUILayout.Space(10);
+
+            // Header avec compteur et badge "à redimensionner"
+            int toResize = _texList.Count(te => te.texture != null && te.curSize > (te.overridden ? te.overrideSize : _maxSizeVals[_texMaxSizeIdx]));
+            EditorGUILayout.BeginHorizontal();
+            SectionLabel("TEXTURES (" + _texList.Count + ")");
+            GUILayout.FlexibleSpace();
+            if (toResize > 0)
+            {
+                var badge = new GUIStyle(EditorStyles.miniLabel)
+                    { normal = { textColor = COL_WARN }, fontStyle = FontStyle.Bold };
+                GUILayout.Label("⚠ " + toResize + " à redimensionner", badge);
+            }
+            else if (_texScanned)
+            {
+                var badge = new GUIStyle(EditorStyles.miniLabel)
+                    { normal = { textColor = COL_SUCCESS }, fontStyle = FontStyle.Bold };
+                GUILayout.Label("✓ Tout est OK", badge);
+            }
+            EditorGUILayout.EndHorizontal();
+
             BeginCard();
             _texScroll = EditorGUILayout.BeginScrollView(_texScroll, GUILayout.MaxHeight(320));
             for (int ti = 0; ti < _texList.Count; ti++)
@@ -3564,30 +3774,56 @@ public class VRChatAvatarOptimizer : EditorWindow
             EndCard();
         }
 
+        // ── TEXTURES INUTILISÉES ─────────────────────────────────────
         if (_unusedTextures.Count > 0)
         {
-            EditorGUILayout.Space(6);
-            SectionLabel(T("tex.unused.section") + " (" + _unusedTextures.Count + ")");
+            EditorGUILayout.Space(10);
+            EditorGUILayout.BeginHorizontal();
+            SectionLabel("TEXTURES INUTILISÉES (" + _unusedTextures.Count + ")");
+            GUILayout.FlexibleSpace();
+            var warnLbl = new GUIStyle(EditorStyles.miniLabel) { normal = { textColor = COL_WARN }, fontStyle = FontStyle.Bold };
+            GUILayout.Label("Non référencées dans le projet", warnLbl);
+            EditorGUILayout.EndHorizontal();
+
             BeginCard();
             for (int _ti = 0; _ti < Mathf.Min(_unusedTextures.Count, 20); _ti++)
             {
                 var t = _unusedTextures[_ti];
-                var _tr = EditorGUILayout.BeginHorizontal(GUILayout.Height(20));
+                var _tr = EditorGUILayout.BeginHorizontal(GUILayout.Height(22));
                 EditorGUI.DrawRect(_tr, _ti % 2 == 0 ? new Color(0,0,0,0) : new Color(1,1,1,0.04f));
-                GUILayout.Label(t != null ? t.name : "null", _styleSmall);
-                if (SmallBtn("Ping")) { Selection.activeObject = t; EditorGUIUtility.PingObject(t); }
+                GUILayout.Space(4);
+                GUILayout.Label(t != null ? t.name : "null", _styleSmall, GUILayout.ExpandWidth(true));
+                if (SmallBtn("📍 Ping")) { Selection.activeObject = t; EditorGUIUtility.PingObject(t); }
                 EditorGUILayout.EndHorizontal();
             }
-            if (_unusedTextures.Count > 20) GUILayout.Label("... et " + (_unusedTextures.Count - 20) + " autres", _styleSmall);
+            if (_unusedTextures.Count > 20)
+                GUILayout.Label("... et " + (_unusedTextures.Count - 20) + " autres", _styleSmall);
+            EndCard();
 
-            if (DangerBtn(T("tex.delete.unused.btn"), GUILayout.Height(28)))
+            EditorGUILayout.Space(4);
+            if (DangerBtn("🗑 Supprimer les " + _unusedTextures.Count + " textures inutilisées", GUILayout.Height(30)))
             {
                 if (EditorUtility.DisplayDialog(T("dlg.confirm"),
-                    T("dlg.delete") + " " + _unusedTextures.Count + " textures ?", T("dlg.delete"), T("dlg.cancel")))
+                    "Supprimer définitivement " + _unusedTextures.Count + " textures ?", T("dlg.delete"), T("dlg.cancel")))
                     DeleteUnusedTextures();
             }
-            EndCard();
         }
+    }
+
+    // Petit toggle avec label — retourne la nouvelle valeur
+    private bool ToggleChip(bool val, string label, string tooltip)
+    {
+        var bg   = val ? new Color(0.09f, 0.56f, 0.95f, 0.18f) : new Color(1,1,1,0.05f);
+        var col  = val ? COL_ACCENT2 : COL_TEXT_DIM;
+        var rect = EditorGUILayout.BeginHorizontal(GUILayout.ExpandWidth(false));
+        EditorGUI.DrawRect(new Rect(rect.x-2, rect.y, rect.width+8, rect.height+2), bg);
+        bool nv = EditorGUILayout.Toggle(val, GUILayout.Width(16));
+        GUILayout.Label(new GUIContent(label, tooltip),
+            new GUIStyle(EditorStyles.miniLabel){ normal={ textColor=col }, fontStyle=FontStyle.Bold },
+            GUILayout.ExpandWidth(false));
+        EditorGUILayout.EndHorizontal();
+        if (nv != val) Repaint();
+        return nv;
     }
 
     private void DrawTextureRow(TexEntry te, int idx)
@@ -3648,6 +3884,20 @@ public class VRChatAvatarOptimizer : EditorWindow
             EditorGUIUtility.AddCursorRect(GUILayoutUtility.GetLastRect(), MouseCursor.Link);
         } else GUILayout.Label("global", dim, GUILayout.Width(64));
         GUILayout.FlexibleSpace();
+
+        // Bouton Apply individuel
+        int applyTargetSz = te.overridden ? te.overrideSize : _maxSizeVals[_texMaxSizeIdx];
+        var applyStyle = new GUIStyle(EditorStyles.miniButton)
+        {
+            normal  = { background = MakeTex(1,1, COL_ACCENT),  textColor = Color.white },
+            hover   = { background = MakeTex(1,1, COL_ACCENT2), textColor = Color.white },
+            active  = { background = MakeTex(1,1, COL_BG3),     textColor = Color.white },
+            fontSize = 10, fontStyle = FontStyle.Bold,
+            padding = new RectOffset(6, 6, 2, 2)
+        };
+        if (GUILayout.Button("▶ Apply", applyStyle, GUILayout.Width(58), GUILayout.Height(18)))
+            ApplyTextureSettings(te.texture, applyTargetSz, te);
+
         EditorGUILayout.EndHorizontal();
 
         // Ligne 3 : info globale
@@ -3955,6 +4205,8 @@ public class VRChatAvatarOptimizer : EditorWindow
                 GUILayout.Label("OPTIONS TEXTURES (appliquees aux nouveaux materiaux)",
                     new GUIStyle(EditorStyles.miniLabel){ normal={ textColor=COL_ACCENT2 }, fontStyle=FontStyle.Bold });
                 EditorGUILayout.Space(2);
+                _matBakeTextures = EditorGUILayout.Toggle(new GUIContent("🎨 Fusionner les calques de texture",
+                    "Bake les textures supplémentaires (tatouages, décals, calques lilToon/Poiyomi) dans _MainTex — les tatouages restent visibles après conversion"), _matBakeTextures);
                 _matTexApply = EditorGUILayout.Toggle(new GUIContent("Appliquer aux textures aussi",
                     "Re-importe les textures des materiaux avec les parametres choisis"), _matTexApply);
                 if (_matTexApply)
@@ -3994,6 +4246,70 @@ public class VRChatAvatarOptimizer : EditorWindow
         }
         EndCard();
 
+        // ── BAKE TEXTURE LAYERS (standalone) ─────────────────────────
+        EditorGUILayout.Space(6);
+        SectionLabel("🎨 BAKE TEXTURE LAYERS");
+        BeginCard();
+        EditorGUILayout.HelpBox(
+            "Fusionne les calques de texture (tatouage, décal, 2nd layer lilToon/Poiyomi...) " +
+            "en une seule image pour chaque matériau de l'avatar.\n" +
+            "Sauvegardé dans Assets/BakedTextures/ — ne modifie pas les matériaux originaux.",
+            MessageType.Info);
+        EditorGUILayout.Space(4);
+
+        EditorGUILayout.BeginHorizontal();
+        if (AccentBtn(new GUIContent("🎨 Bake tous les matériaux",
+            "Bake les calques visibles de chaque matériau de l'avatar sélectionné"),
+            GUILayout.Height(30), GUILayout.ExpandWidth(true)))
+        {
+            BakeAllAvatarMaterials();
+        }
+        EditorGUILayout.EndHorizontal();
+        EndCard();
+
+    }
+
+    private void BakeAllAvatarMaterials()
+    {
+        if (_avatar == null) return;
+        var mats = new HashSet<Material>();
+        foreach (var r in _avatar.GetComponentsInChildren<Renderer>(true))
+            foreach (var m in r.sharedMaterials)
+                if (m != null) mats.Add(m);
+
+        int baked = 0, skipped = 0;
+        try
+        {
+            int idx = 0;
+            foreach (var mat in mats)
+            {
+                EditorUtility.DisplayProgressBar("Bake textures", mat.name, (float)idx++ / mats.Count);
+                string srcPath = AssetDatabase.GetAssetPath(mat);
+                string dir = "Assets/BakedTextures";
+
+                // Skip les matériaux Quest (déjà simples, pas de calques à fusionner)
+                if (mat.shader.name.StartsWith("VRChat/Mobile/") || mat.shader.name.Contains("Mobile"))
+                    { skipped++; continue; }
+
+                var result = BakeLayeredTexture(mat, dir, mat.name);
+                if (result != null)
+                {
+                    Undo.RecordObject(mat, "Bake texture layers");
+                    mat.SetTexture("_MainTex", result);
+                    EditorUtility.SetDirty(mat);
+                    baked++;
+                }
+            }
+        }
+        finally { EditorUtility.ClearProgressBar(); }
+
+        AssetDatabase.SaveAssets();
+        AssetDatabase.Refresh();
+
+        Log(LogLevel.Success, baked + " matériau(x) bakés, " + skipped + " ignorés (1 calque)");
+        EditorUtility.DisplayDialog("Bake terminé",
+            baked + " matériau(x) bakés → _MainTex mis à jour\n" +
+            skipped + " ignorés (un seul calque détecté)", "OK");
     }
 
     private void ScanAllMaterials()
@@ -4110,8 +4426,7 @@ public class VRChatAvatarOptimizer : EditorWindow
         SectionLabel(T("tools.clean.section"));
         BeginCard();
         _opt_missingScripts = EditorGUILayout.Toggle(new GUIContent(T("tools.clean.missing"), "Supprime les references de scripts supprimes"),    _opt_missingScripts);
-        OptToggleRow(ref _opt_emptyObjects,   T("tools.clean.empty"),   "Supprime les GameObjects sans composant ni enfant",   "⚠", COL_WARN, "Peut supprimer des pivots ou objets de reference");
-        _opt_dupMaterials  = EditorGUILayout.Toggle(new GUIContent(T("tools.clean.dedup"),   "Fusionne les materiaux identiques en un seul"),     _opt_dupMaterials);
+_opt_dupMaterials  = EditorGUILayout.Toggle(new GUIContent(T("tools.clean.dedup"),   "Fusionne les materiaux identiques en un seul"),     _opt_dupMaterials);
         _opt_removeAudio   = EditorGUILayout.Toggle(new GUIContent(T("tools.clean.audio"),   "Retire tous les composants AudioSource de l'avatar"), _opt_removeAudio);
         _opt_removeCameras = EditorGUILayout.Toggle(new GUIContent(T("tools.clean.cameras"), "Retire toutes les cameras attachees a l'avatar"),    _opt_removeCameras);
         EditorGUILayout.Space(4);
@@ -4408,6 +4723,14 @@ public class VRChatAvatarOptimizer : EditorWindow
                 ? "Assets/Materials"
                 : System.IO.Path.GetDirectoryName(srcPath).Replace("\\", "/");
             if (!System.IO.Directory.Exists(dir)) System.IO.Directory.CreateDirectory(dir);
+
+            // Bake les calques de texture (tatouages, décals, etc.)
+            if (_matBakeTextures)
+            {
+                var baked = BakeLayeredTexture(m.mat, "Assets/BakedTextures", m.mat.name);
+                if (baked != null) newMat.SetTexture("_MainTex", baked);
+            }
+
             string newPath = AssetDatabase.GenerateUniqueAssetPath(dir + "/" + newMat.name + ".mat");
             AssetDatabase.CreateAsset(newMat, newPath);
 
@@ -4428,6 +4751,102 @@ public class VRChatAvatarOptimizer : EditorWindow
         AssetDatabase.Refresh();
         Log(LogLevel.Success, n + " materiaux crees et remplaces par " + _targetShaderNames[_opt_targetShader]);
         return n;
+    }
+
+    // Mots-clés indiquant une texture NON-couleur (normal map, roughness, AO...)
+    private static readonly string[] _nonColorKeywords =
+        { "normal", "bump", "roughness", "metallic", "occlusion", "ao",
+          "height", "specular", "shadow", "shading", "outline", "rim",
+          "matcap", "toon", "ramp", "noise", "lut", "emission", "emissive" };
+
+    private bool IsNonColorProp(string propName)
+    {
+        var low = propName.ToLowerInvariant();
+        foreach (var kw in _nonColorKeywords) if (low.Contains(kw)) return true;
+        return false;
+    }
+
+    // Collecte les textures couleur d'un matériau en énumérant toutes ses propriétés shader.
+    private List<Texture2D> CollectColorLayers(Material srcMat)
+    {
+        var layers = new List<Texture2D>();
+        var seen   = new HashSet<int>(); // évite les doublons par instanceID
+        int propCount = ShaderUtil.GetPropertyCount(srcMat.shader);
+        for (int i = 0; i < propCount; i++)
+        {
+            if (ShaderUtil.GetPropertyType(srcMat.shader, i) != ShaderUtil.ShaderPropertyType.TexEnv) continue;
+            string prop = ShaderUtil.GetPropertyName(srcMat.shader, i);
+            if (IsNonColorProp(prop)) continue;
+            var t = srcMat.GetTexture(prop) as Texture2D;
+            if (t != null && seen.Add(t.GetInstanceID())) layers.Add(t);
+        }
+        return layers;
+    }
+
+    // Rend le matériau PC sur un quad UV via son pass ForwardBase → capture TOUS les calques
+    // (lilToon _Main2ndTex, Poiyomi décals, etc.) tels que le shader les affiche.
+    private Texture2D BakeLayeredTexture(Material srcMat, string saveDir, string matName)
+    {
+        // Dimensions depuis la texture principale
+        int w = 1024, h = 1024;
+        Texture mainTex = null;
+        foreach (var p in new[]{ "_MainTex", "_BaseMap", "_BaseColorMap" })
+            if (srcMat.HasProperty(p)) { mainTex = srcMat.GetTexture(p); if (mainTex != null) { w = mainTex.width; h = mainTex.height; break; } }
+
+        if (mainTex == null)
+        {
+            Log(LogLevel.Warn, "Bake [" + matName + "] : pas de texture principale → ignoré");
+            return null;
+        }
+        w = Mathf.Clamp(w, 64, 4096);
+        h = Mathf.Clamp(h, 64, 4096);
+
+        // Cherche le pass de rendu couleur (ForwardBase / Always)
+        int fwdPass = -1;
+        for (int i = 0; i < srcMat.passCount; i++)
+        {
+            string pn = srcMat.GetPassName(i).ToUpperInvariant();
+            if (!pn.Contains("SHADOW") && !pn.Contains("META") && !pn.Contains("ADD") &&
+                (pn.Contains("FORWARD") || pn.Contains("BASE") || pn == "ALWAYS"))
+            { fwdPass = i; break; }
+        }
+
+        var rt     = RenderTexture.GetTemporary(w, h, 0, RenderTextureFormat.ARGB32, RenderTextureReadWrite.sRGB);
+        var prevRT = RenderTexture.active;
+
+        try
+        {
+            // Blit avec le shader original → compose tous ses calques internes (tatouages, décals…)
+            if (fwdPass >= 0)
+                Graphics.Blit(mainTex, rt, srcMat, fwdPass);
+            else
+                Graphics.Blit(mainTex, rt); // fallback : copie simple
+        }
+        catch (System.Exception e)
+        {
+            Log(LogLevel.Warn, "Bake [" + matName + "] Blit échoué (pass " + fwdPass + ") : " + e.Message);
+            RenderTexture.active = prevRT;
+            RenderTexture.ReleaseTemporary(rt);
+            return null;
+        }
+
+        RenderTexture.active = rt;
+        var result = new Texture2D(w, h, TextureFormat.RGBA32, false);
+        result.ReadPixels(new Rect(0, 0, w, h), 0, 0, false);
+        result.Apply();
+        RenderTexture.active = prevRT;
+        RenderTexture.ReleaseTemporary(rt);
+
+        EnsureFolder(saveDir);
+        string safeName  = matName.Replace("/", "_").Replace("\\", "_").Replace(":", "_");
+        string assetPath = saveDir + "/" + safeName + "_baked.png";
+        string absPath   = Application.dataPath.Substring(0, Application.dataPath.Length - 6) + assetPath;
+        File.WriteAllBytes(absPath, result.EncodeToPNG());
+        UnityEngine.Object.DestroyImmediate(result);
+        AssetDatabase.ImportAsset(assetPath, ImportAssetOptions.ForceUpdate);
+
+        Log(LogLevel.Info, "Baked [" + matName + "] → " + assetPath + " (pass " + fwdPass + ", " + w + "×" + h + ")");
+        return AssetDatabase.LoadAssetAtPath<Texture2D>(assetPath);
     }
 
     private int CleanKeyframes()
